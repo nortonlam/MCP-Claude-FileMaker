@@ -5,7 +5,7 @@ import dotenv from 'dotenv';
 dotenv.config({ quiet: true });
 
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
-import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
+import { SSEServerTransport } from '@modelcontextprotocol/sdk/server/sse.js';
 import {
   CallToolRequestSchema,
   ListToolsRequestSchema,
@@ -13,6 +13,7 @@ import {
 import axios from 'axios';
 import https from 'https';
 import NodeCache from 'node-cache';
+import express from 'express';
 
 // Create an agent that accepts self-signed certificates
 const httpsAgent = new https.Agent({
@@ -44,8 +45,8 @@ for (const serverKey of serverKeys) {
   const username = process.env[`FM_ACCOUNT_${identifier}`];
   const password = process.env[`FM_PASSWORD_${identifier}`];
   const apiKey = process.env[`FM_API_KEY_${identifier}`];
-  const protocol = process.env.FM_PROTOCOL || 'https';
-  const apiVersion = process.env.FM_API_VERSION || 'v1';
+  const protocol = process.env[`FM_PROTOCOL_${identifier}`] || process.env.FM_PROTOCOL || 'https';
+  const apiVersion = process.env[`FM_API_VERSION_${identifier}`] || process.env.FM_API_VERSION || 'v1';
   
   if (server && database && ((username && password) || apiKey)) {
     databases[identifier] = {
@@ -138,7 +139,7 @@ async function makeFileMakerRequest(dbConfig, method, endpoint, data = null) {
 }
 
 // Create MCP server
-const server = new Server(
+const mcpServer = new Server(
   {
     name: 'mcp-claude-filemaker',
     version: '1.0.0',
@@ -151,7 +152,7 @@ const server = new Server(
 );
 
 // Define available tools
-server.setRequestHandler(ListToolsRequestSchema, async () => {
+mcpServer.setRequestHandler(ListToolsRequestSchema, async () => {
   return {
     tools: [
       {
@@ -394,7 +395,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
 });
 
 // Handle tool calls
-server.setRequestHandler(CallToolRequestSchema, async (request) => {
+mcpServer.setRequestHandler(CallToolRequestSchema, async (request) => {
   const { name, arguments: args } = request.params;
   
   try {
@@ -480,7 +481,6 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         let method = 'GET';
         let requestData = null;
         
-        // If query is provided, use POST to _find
         if (args.query && args.query.length > 0) {
           endpoint = `/layouts/${encodeURIComponent(args.layout)}/_find`;
           method = 'POST';
@@ -491,7 +491,6 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             ...(args.offset && { offset: args.offset })
           };
         } else {
-          // Simple GET request with parameters
           const params = new URLSearchParams();
           if (args.limit) params.append('_limit', args.limit.toString());
           if (args.offset) params.append('_offset', args.offset.toString());
@@ -512,15 +511,11 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         const dbConfig = databases[args.database];
         if (!dbConfig) throw new Error('Database not found');
         
-        const requestData = {
-          fieldData: args.fieldData
-        };
-        
         const result = await makeFileMakerRequest(
           dbConfig, 
           'POST', 
           `/layouts/${encodeURIComponent(args.layout)}/records`, 
-          requestData
+          { fieldData: args.fieldData }
         );
         
         return {
@@ -535,15 +530,11 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         const dbConfig = databases[args.database];
         if (!dbConfig) throw new Error('Database not found');
         
-        const requestData = {
-          fieldData: args.fieldData
-        };
-        
         const result = await makeFileMakerRequest(
           dbConfig,
           'PATCH',
           `/layouts/${encodeURIComponent(args.layout)}/records/${args.recordId}`,
-          requestData
+          { fieldData: args.fieldData }
         );
         
         return {
@@ -646,17 +637,51 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   }
 });
 
-// Start server
-async function main() {
-  try {
-    const transport = new StdioServerTransport();
-    await server.connect(transport);
-    console.error('MCP Claude FileMaker server started successfully');
-  } catch (error) {
-    console.error('Failed to start server:', error);
-    process.exit(1);
+// Start HTTP server with SSE transport
+const app = express();
+const PORT = process.env.PORT || 8080;
+
+// Track active SSE transports
+const transports = new Map();
+
+app.get('/sse', async (req, res) => {
+  console.error('New SSE connection from', req.ip);
+  const transport = new SSEServerTransport('/messages', res);
+  transports.set(transport.sessionId, transport);
+
+  res.on('close', () => {
+    transports.delete(transport.sessionId);
+    console.error('SSE connection closed:', transport.sessionId);
+  });
+
+  await mcpServer.connect(transport);
+});
+
+app.post('/messages', express.json(), async (req, res) => {
+  const sessionId = req.query.sessionId;
+  const transport = transports.get(sessionId);
+
+  if (!transport) {
+    res.status(404).json({ error: 'Session not found' });
+    return;
   }
-}
+
+  await transport.handlePostMessage(req, res);
+});
+
+app.get('/health', (req, res) => {
+  res.json({ 
+    status: 'ok', 
+    databases: databaseNames,
+    timestamp: new Date().toISOString()
+  });
+});
+
+app.listen(PORT, () => {
+  console.error(`MCP Claude FileMaker SSE server running on port ${PORT}`);
+  console.error(`SSE endpoint: http://localhost:${PORT}/sse`);
+  console.error(`Health check: http://localhost:${PORT}/health`);
+});
 
 // Error handling
 process.on('uncaughtException', (error) => {
@@ -668,5 +693,3 @@ process.on('unhandledRejection', (reason, promise) => {
   console.error('Unhandled rejection at:', promise, 'reason:', reason);
   process.exit(1);
 });
-
-main();
