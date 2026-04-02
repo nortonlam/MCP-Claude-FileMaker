@@ -666,6 +666,23 @@ app.get('/.well-known/oauth-protected-resource', (req, res) => {
   });
 });
 
+// GET /mcp - required by some MCP clients that probe before POSTing
+app.get('/mcp', async (req, res) => {
+  console.error('GET /mcp probe from', req.ip);
+  try {
+    const server = createMcpServer();
+    const transport = new StreamableHTTPServerTransport({
+      sessionIdGenerator: undefined,
+    });
+    await server.connect(transport);
+    await transport.handleRequest(req, res, req.body);
+    await server.close();
+  } catch (error) {
+    console.error('MCP GET error:', error);
+    res.status(405).json({ error: 'Method not allowed', message: 'Use POST for MCP requests' });
+  }
+});
+
 // Main MCP endpoint (Streamable HTTP) - fresh server per request
 app.post('/mcp', async (req, res) => {
   console.error('New MCP request from', req.ip);
@@ -681,6 +698,12 @@ app.post('/mcp', async (req, res) => {
     console.error('MCP request error:', error);
     res.status(500).json({ error: 'Internal server error' });
   }
+});
+
+// DELETE /mcp - session cleanup
+app.delete('/mcp', async (req, res) => {
+  console.error('DELETE /mcp from', req.ip);
+  res.status(200).json({ message: 'Session closed' });
 });
 
 app.get('/health', (req, res) => {
