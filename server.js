@@ -5,7 +5,7 @@ import dotenv from 'dotenv';
 dotenv.config({ quiet: true });
 
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
-import { SSEServerTransport } from '@modelcontextprotocol/sdk/server/sse.js';
+import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import {
   CallToolRequestSchema,
   ListToolsRequestSchema,
@@ -637,36 +637,44 @@ mcpServer.setRequestHandler(CallToolRequestSchema, async (request) => {
   }
 });
 
-// Start HTTP server with SSE transport
+// Start HTTP server with Streamable HTTP transport
 const app = express();
 const PORT = process.env.PORT || 8080;
+const BASE_URL = process.env.BASE_URL || `http://localhost:${PORT}`;
 
-// Track active SSE transports
-const transports = new Map();
+app.use(express.json());
 
-app.get('/sse', async (req, res) => {
-  console.error('New SSE connection from', req.ip);
-  const transport = new SSEServerTransport('/messages', res);
-  transports.set(transport.sessionId, transport);
-
-  res.on('close', () => {
-    transports.delete(transport.sessionId);
-    console.error('SSE connection closed:', transport.sessionId);
+// OAuth discovery endpoints - required by claude.ai even for authless servers
+app.get('/.well-known/oauth-authorization-server', (req, res) => {
+  res.json({
+    issuer: BASE_URL,
+    authorization_endpoint: `${BASE_URL}/oauth/authorize`,
+    token_endpoint: `${BASE_URL}/oauth/token`,
+    response_types_supported: ['code'],
+    grant_types_supported: ['authorization_code'],
   });
-
-  await mcpServer.connect(transport);
 });
 
-app.post('/messages', express.json(), async (req, res) => {
-  const sessionId = req.query.sessionId;
-  const transport = transports.get(sessionId);
+app.get('/.well-known/oauth-protected-resource', (req, res) => {
+  res.json({
+    resource: BASE_URL,
+    authorization_servers: [BASE_URL],
+  });
+});
 
-  if (!transport) {
-    res.status(404).json({ error: 'Session not found' });
-    return;
+// Main MCP endpoint (Streamable HTTP)
+app.post('/mcp', async (req, res) => {
+  console.error('New MCP request from', req.ip);
+  try {
+    const transport = new StreamableHTTPServerTransport({
+      sessionIdGenerator: undefined, // stateless mode
+    });
+    await mcpServer.connect(transport);
+    await transport.handleRequest(req, res, req.body);
+  } catch (error) {
+    console.error('MCP request error:', error);
+    res.status(500).json({ error: 'Internal server error' });
   }
-
-  await transport.handlePostMessage(req, res);
 });
 
 app.get('/health', (req, res) => {
@@ -678,9 +686,9 @@ app.get('/health', (req, res) => {
 });
 
 app.listen(PORT, () => {
-  console.error(`MCP Claude FileMaker SSE server running on port ${PORT}`);
-  console.error(`SSE endpoint: http://localhost:${PORT}/sse`);
-  console.error(`Health check: http://localhost:${PORT}/health`);
+  console.error(`MCP Claude FileMaker server running on port ${PORT}`);
+  console.error(`MCP endpoint: ${BASE_URL}/mcp`);
+  console.error(`Health check: ${BASE_URL}/health`);
 });
 
 // Error handling
