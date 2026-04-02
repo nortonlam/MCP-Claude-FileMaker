@@ -8,7 +8,7 @@ WORKDIR /app
 COPY package*.json ./
 
 # Install all dependencies (including dev dependencies for building)
-RUN npm ci
+RUN npm install
 
 # Copy source code
 COPY . .
@@ -26,16 +26,10 @@ WORKDIR /app
 COPY package*.json ./
 
 # Install only production dependencies
-RUN npm ci --omit=dev && npm cache clean --force
+RUN npm install --omit=dev && npm cache clean --force
 
 # Copy built application from builder stage
-COPY --from=builder /app/build ./build/
 COPY --from=builder /app/server.js ./
-COPY --from=builder /app/.env.example ./ 
-
-# Copy other necessary files
-COPY --from=builder /app/README.md ./
-COPY --from=builder /app/connectors/ ./connectors/
 
 # Create non-root user
 RUN groupadd -g 1001 nodegroup && \
@@ -48,12 +42,12 @@ RUN mkdir -p logs && chown nodeuser:nodegroup logs
 RUN chown -R nodeuser:nodegroup /app
 USER nodeuser
 
-# Expose port (optional, for HTTP mode)
-EXPOSE 3000
+# Expose port
+EXPOSE 8080
 
 # Health check
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
-  CMD node -e "console.log('Health check passed')" || exit 1
+  CMD node -e "require('http').get('http://localhost:8080/health', r => process.exit(r.statusCode === 200 ? 0 : 1)).on('error', () => process.exit(1))"
 
 # Default command
 CMD ["node", "server.js"]
