@@ -138,21 +138,22 @@ async function makeFileMakerRequest(dbConfig, method, endpoint, data = null) {
   }
 }
 
-// Create MCP server
-const mcpServer = new Server(
-  {
-    name: 'mcp-claude-filemaker',
-    version: '1.0.0',
-  },
-  {
-    capabilities: {
-      tools: {},
+// Factory function - creates a fresh Server instance per request
+function createMcpServer() {
+  const mcpServer = new Server(
+    {
+      name: 'mcp-claude-filemaker',
+      version: '1.0.0',
     },
-  }
-);
+    {
+      capabilities: {
+        tools: {},
+      },
+    }
+  );
 
-// Define available tools
-mcpServer.setRequestHandler(ListToolsRequestSchema, async () => {
+  // Define available tools
+  mcpServer.setRequestHandler(ListToolsRequestSchema, async () => {
   return {
     tools: [
       {
@@ -637,6 +638,9 @@ mcpServer.setRequestHandler(CallToolRequestSchema, async (request) => {
   }
 });
 
+  return mcpServer;
+}
+
 // Start HTTP server with Streamable HTTP transport
 const app = express();
 const PORT = process.env.PORT || 8080;
@@ -662,15 +666,17 @@ app.get('/.well-known/oauth-protected-resource', (req, res) => {
   });
 });
 
-// Main MCP endpoint (Streamable HTTP)
+// Main MCP endpoint (Streamable HTTP) - fresh server per request
 app.post('/mcp', async (req, res) => {
   console.error('New MCP request from', req.ip);
   try {
+    const server = createMcpServer();
     const transport = new StreamableHTTPServerTransport({
       sessionIdGenerator: undefined, // stateless mode
     });
-    await mcpServer.connect(transport);
+    await server.connect(transport);
     await transport.handleRequest(req, res, req.body);
+    await server.close();
   } catch (error) {
     console.error('MCP request error:', error);
     res.status(500).json({ error: 'Internal server error' });
